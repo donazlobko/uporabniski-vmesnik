@@ -7,13 +7,14 @@ Created on Sat Sep 13 10:17:25 2025
 """
 
 # model_core.py
-# — jedro meta-modela: definicije in funkciji U_generalized(PE,G,T) in g_generalized(U,G,T)
-#   NI nobenih printov, string-tekstov za prikaz ali interaktivnosti.
+# — Jedro meta-modela: učenje 2D koeficientov, gladka omejitev izhodov,
+#   ter čiste javne funkcije U_generalized(PE,G,T) in g_generalized(U,G,T).
+#   Pomembno: ob uvozu NI nobenih printov in NI interaktivnosti.
 
 import numpy as np
 import math
 from dataclasses import dataclass
-from typing import Callable, Dict, List, Tuple
+from typing import Dict, List
 
 # -------------------------
 # VHODNI PODATKI (tri “učne” lokacije)
@@ -35,8 +36,12 @@ G_COEFS = {
     "Malaga":    dict(b0=0.192, b1=0.035, b2=0.000,  b3=0.0),
 }
 
+# FIZIKALNE MEJE (za "squash")
+U_MIN, U_MAX = 0.2, 2.4
+G_MIN, G_MAX = 0.2, 0.7
+
 # -------------------------
-# 2D FIT KANDIDATI in ORODJA (isti kot prej, le brez printov)
+# 2D FIT KANDIDATI in ORODJA
 # -------------------------
 @dataclass
 class Fit2DResult:
@@ -55,6 +60,7 @@ def _ridge_solve(X: np.ndarray, y: np.ndarray, alpha: float = RIDGE_ALPHA) -> np
     return np.linalg.solve(A, b)
 
 def _build_X(G: np.ndarray, T: np.ndarray, family: str):
+    import math as _m
     if family == "lin_G_T":
         X = np.column_stack([np.ones_like(G), G, T])
         predict = lambda params, g, t: float(params[0] + params[1]*g + params[2]*t)
@@ -73,23 +79,23 @@ def _build_X(G: np.ndarray, T: np.ndarray, family: str):
         return X, predict
     if family == "lin_lnG_T":
         X = np.column_stack([np.ones_like(G), np.log(G), T])
-        predict = lambda params, g, t: float(params[0] + params[1]*math.log(g) + params[2]*t)
+        predict = lambda params, g, t: float(params[0] + params[1]*_m.log(g) + params[2]*t)
         return X, predict
     if family == "lin_G_lnT":
         X = np.column_stack([np.ones_like(G), G, np.log(T)])
-        predict = lambda params, g, t: float(params[0] + params[1]*g + params[2]*math.log(t))
+        predict = lambda params, g, t: float(params[0] + params[1]*g + params[2]*_m.log(t))
         return X, predict
     if family == "lin_lnG_lnT":
         X = np.column_stack([np.ones_like(G), np.log(G), np.log(T)])
-        predict = lambda params, g, t: float(params[0] + params[1]*math.log(g) + params[2]*math.log(t))
+        predict = lambda params, g, t: float(params[0] + params[1]*_m.log(g) + params[2]*_m.log(t))
         return X, predict
     if family == "exp_GT":
         X = np.column_stack([np.ones_like(G), G, T])
-        predict = lambda params, g, t: float(math.exp(params[0] + params[1]*g + params[2]*t))
+        predict = lambda params, g, t: float(_m.exp(params[0] + params[1]*g + params[2]*t))
         return X, predict
     if family == "power_GT":
         X = np.column_stack([np.ones_like(G), np.log(G), np.log(T)])
-        predict = lambda params, g, t: float(math.exp(params[0]) * (g**params[1]) * (t**params[2]))
+        predict = lambda params, g, t: float(_m.exp(params[0]) * (g**params[1]) * (t**params[2]))
         return X, predict
     raise ValueError("Neznana družina modelov.")
 
@@ -161,7 +167,7 @@ def coeff_keys(prefix: str, store: Dict[str, Dict[str, float]]) -> List[str]:
 def stack_y(keys: List[str], store: Dict[str, Dict[str, float]], locs: List[str]):
     return {k: np.array([store[loc].get(k, 0.0) for loc in locs], float) for k in keys}
 
-# — nauči 2D meta-koeficiente pri importu (brez izpisov)
+# — Nauči 2D meta-koeficiente pri importu (brez izpisov)
 _locs = list(GLOB.keys())
 _G = np.array([GLOB[L] for L in _locs], float)
 _T = np.array([TEMP[L] for L in _locs], float)
@@ -176,10 +182,64 @@ a_pred = {k: build_predictor_2d(a_fit[k]) for k in a_keys}
 b_pred = {k: build_predictor_2d(b_fit[k]) for k in b_keys}
 
 # -------------------------
-# JAVNE FUNKCIJE
+# POMOŽNE: surovi izračun + gladka omejitev
+# -------------------------
+def __U_raw(PE: float, G: float, T: float) -> float:
+    val = 0.0
+    for k in a_keys:
+        p = int(k[1:])
+        val += a_pred[k](G, T) * (PE ** p)
+    return float(val)
+
+def __g_raw(U: float, G: float, T: float) -> float:
+    val = 0.0
+    for k in b_keys:
+        p = int(k[1:])
+        val += b_pred[k](G, T) * (U ** p)
+    return float(val)
+
+def __squash_sigmoid(x: float, lo: float, hi: float, center: float, scale: float) -> float:
+    z = (x - center) / (scale if scale > 1e-12 else 1.0)
+    s = 1.0 / (1.0 + math.exp(-z))
+    return lo + (hi - lo) * s
+
+def __calibrate_centers_and_scales():
+    PE_grid = np.linspace(10.0, 250.0, 200)     # kWh/m2a
+    U_grid  = np.linspace(U_MIN, U_MAX, 200)
+
+    U_vals, g_vals = [], []
+    for L in _locs:
+        Gv, Tv = GLOB[L], TEMP[L]
+        U_vals.append(np.array([__U_raw(pe, Gv, Tv) for pe in PE_grid], float))
+        g_vals.append(np.array([__g_raw(u, Gv, Tv) for u in U_grid], float))
+
+    U_all = np.concatenate(U_vals)
+    g_all = np.concatenate(g_vals)
+
+    U_center = float(np.median(U_all))
+    g_center = float(np.median(g_all))
+
+    def iqr(x):
+        q1, q3 = np.percentile(x, [25, 75])
+        return max(q3 - q1, 1e-6)
+
+    U_scale = float(iqr(U_all) / 1.349)
+    g_scale = float(iqr(g_all) / 1.349)
+    if U_scale < 0.05: U_scale = 0.05
+    if g_scale < 0.02: g_scale = 0.02
+
+    return U_center, U_scale, g_center, g_scale
+
+_U_center, _U_scale, _g_center, _g_scale = __calibrate_centers_and_scales()
+
+# -------------------------
+# JAVNE FUNKCIJE (z omejitvijo na fizikalne intervale)
 # -------------------------
 def U_generalized(PE: float, G: float, T: float) -> float:
-    return sum(a_pred[k](G, T) * (PE ** int(k[1:])) for k in a_keys)
+    u = __U_raw(PE, G, T)
+    return __squash_sigmoid(u, U_MIN, U_MAX, _U_center, _U_scale)
 
 def g_generalized(U: float, G: float, T: float) -> float:
-    return sum(b_pred[k](G, T) * (U  ** int(k[1:])) for k in b_keys)
+    gg = __g_raw(U, G, T)
+    return __squash_sigmoid(gg, G_MIN, G_MAX, _g_center, _g_scale)
+
