@@ -10,21 +10,18 @@ import streamlit as st
 from model_core import U_generalized, g_generalized
 
 st.set_page_config(page_title="U & g – izračun", layout="centered")
-st.markdown(
-    """
-    <style>
-      #MainMenu {visibility: hidden;}
-      header {visibility: hidden;}
-      footer {visibility: hidden;}
-      .block-container {padding-top: 1rem; padding-bottom: 2rem;}
-    </style>
-    """,
-    unsafe_allow_html=True,
-)
+st.markdown("""
+<style>
+  #MainMenu {visibility: hidden;}
+  header {visibility: hidden;}
+  footer {visibility: hidden;}
+  .block-container {padding-top: 1rem; padding-bottom: 2rem;}
+</style>
+""", unsafe_allow_html=True)
 
 st.title("Izračun U(PE, G, T) in g(U, G, T)")
 
-# --- VNOSI ---
+# ---- VNOSI ----
 kraj = st.text_input("Kraj (poljubno besedilo)", placeholder="npr. Ljubljana")
 
 col1, col2 = st.columns(2)
@@ -33,12 +30,23 @@ with col1:
 with col2:
     T = st.number_input("Povprečna letna temperatura T [°C]", value=12.6, step=0.1, format="%.1f")
 
-PE = st.number_input("Želen PE [kWh/m²a]", min_value=0.0, max_value=10000.0, value=130.0, step=0.5)
+PE = st.number_input("Želen PE [kWh/m²a]", min_value=0.0, max_value=10000.0, value=120.0, step=0.5)
+PE_MIN, PE_MAX = 15.0, 90.0
+st.caption(f"Sprejemljiv razpon za PE je {PE_MIN:.0f}–{PE_MAX:.0f} kWh/m²a.")
 
 st.divider()
 
-# --- GUMB IN IZPIS ---
+# ---- GUMB IN IZPIS ----
 if st.button("Izračunaj"):
+    # ✅ VALIDACIJA: ne računaj, če je PE izven razpona
+    if PE < PE_MIN:
+        st.warning(f"Izbrana PE ({PE:.1f}) je **premajhna**. Sprejemljiv razpon je {PE_MIN:.0f}–{PE_MAX:.0f} kWh/m²a.")
+        st.stop()
+    if PE > PE_MAX:
+        st.warning(f"Izbrana PE ({PE:.1f}) je **prevelika**. Sprejemljiv razpon je {PE_MIN:.0f}–{PE_MAX:.0f} kWh/m²a.")
+        st.stop()
+
+    # če pridemo sem, je PE veljavna → izračunamo
     try:
         Uopt = U_generalized(PE=PE, G=G, T=T)
         gopt = g_generalized(U=Uopt, G=G, T=T)
